@@ -4,7 +4,11 @@ from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 import os, time, json
 import datetime
+from cache import redis_client
+
 router = APIRouter()
+
+METRICS_CACHE_TTL = 300  # seconds
 
 SCOPES = [
     "https://www.googleapis.com/auth/fitness.activity.read",
@@ -33,15 +37,21 @@ def connect_google_fit():
 
 
 @router.get("/get-metrics")
-def get_metrics():
+async def get_metrics():
     if not os.path.exists(TOKEN_FILE):
         raise HTTPException(status_code=401, detail="Google Fit not connected")
+
+    today = datetime.datetime.now()
+    cache_key = f"fit:metrics:{today.date().isoformat()}"
+
+    cached = await redis_client.get(cache_key)
+    if cached:
+        return json.loads(cached)
 
     creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
     service = build("fitness", "v1", credentials=creds)
 
     end_time = int(time.time() * 1000)
-    today = datetime.datetime.now()
     start_of_day = datetime.datetime(today.year, today.month, today.day)
     start_time = int(start_of_day.timestamp() * 1000)
 
@@ -87,11 +97,14 @@ def get_metrics():
                         if weights:
                             weight = weights[-1]
 
-        return {
+        result = {
             "steps": steps,
             "average_heart_rate": avg_hr,
             "weight": weight,
         }
+
+        await redis_client.set(cache_key, json.dumps(result), ex=METRICS_CACHE_TTL)
+        return result
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch: {e}")
